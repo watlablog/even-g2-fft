@@ -45,3 +45,23 @@ test('reports transfer failures, can retry, and discards pending work on disposa
   await sender.request()
   assert.equal(calls, 2)
 })
+
+test('whenIdle waits for the in-flight transfer before a page can be rebuilt', async () => {
+  let release
+  const events = []
+  const sender = new LatestFrameSender(async () => {
+    events.push('old image started')
+    await new Promise(resolve => { release = resolve })
+    events.push('old image finished')
+  }, error => { throw error })
+  sender.request()
+  await Promise.resolve()
+  sender.request()
+  sender.dispose() // Drop pending work, but wait for the already-started image.
+  const switching = sender.whenIdle().then(() => events.push('page rebuilt'))
+  await Promise.resolve()
+  assert.deepEqual(events, ['old image started'])
+  release()
+  await switching
+  assert.deepEqual(events, ['old image started', 'old image finished', 'page rebuilt'])
+})

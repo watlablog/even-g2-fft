@@ -27,3 +27,7 @@ canvas {
   image-rendering: pixelated;
   background: #000;
 }
+
+canvas[hidden] {
+  display: none;
+}

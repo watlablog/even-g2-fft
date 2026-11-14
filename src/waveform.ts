@@ -11,6 +11,7 @@ const PLOT_WIDTH = RIGHT - LEFT + 1
 export function drawWaveform(
   context: CanvasRenderingContext2D,
   recording: RecordingBuffer,
+  calculating = false,
 ): Uint8Array {
   context.fillStyle = '#000'
   context.fillRect(0, 0, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -43,6 +44,17 @@ export function drawWaveform(
     const top = yOf(envelope.maximum[x])
     const bottom = yOf(envelope.minimum[x])
     context.fillRect(LEFT + x, top, 1, bottom - top + 1)
+  }
+
+  if (calculating) {
+    // Image origin is (144, 92), so (144, 52) is the screen center.
+    context.fillStyle = '#000'
+    context.fillRect(50, 36, 188, 32)
+    context.fillStyle = '#fff'
+    context.font = '18px monospace'
+    context.textAlign = 'center'
+    context.fillText('Calculating...', 144, 52)
+    context.textAlign = 'left'
   }
 
   // Raw Gray8, one byte per pixel; the SDK handles transfer compression.

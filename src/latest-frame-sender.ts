@@ -36,4 +36,8 @@ export class LatestFrameSender {
     this.disposed = true
     this.pending = false
   }
+
+  async whenIdle(): Promise<void> {
+    while (this.running) await this.running
+  }
 }
