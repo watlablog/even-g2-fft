@@ -3,7 +3,8 @@ import {
   ImageContainerProperty,
   ImageRawDataUpdate,
   ImageRawDataUpdateResult,
-  OsEventTypeList,
+  MenuContainerProperty,
+  MenuItemProperty,
   RebuildPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
@@ -15,7 +16,9 @@ import { FFT_SIZE, RecordingTooShortError } from './fft.ts'
 import { FftClient } from './fft-client.ts'
 import { LatestFrameSender } from './latest-frame-sender.ts'
 import { RecordingBuffer } from './recording.ts'
-import { drawSpectrum, prepareSpectrum, SCREEN_HEIGHT, SCREEN_WIDTH } from './spectrum.ts'
+import { cursorReadout, drawSpectrum, prepareSpectrum, SCREEN_HEIGHT, SCREEN_WIDTH } from './spectrum.ts'
+import type { SpectrumTile } from './spectrum.ts'
+import { CURSOR_MODE_ID, NORMAL_MODE_ID, SpectrumControls } from './spectrum-controls.ts'
 import { drawWaveform, IMAGE_HEIGHT, IMAGE_WIDTH } from './waveform.ts'
 import './style.css'
 
@@ -85,6 +88,8 @@ async function start() {
   let measuredAt = performance.now()
   let calculatingVisible = false
   let fft: FftClient | undefined
+  const controls = new SpectrumControls()
+  let lastSpectrumKey = ''
 
   function statusText() {
     const duration = (recording.sampleCount / recording.sampleRate).toFixed(1)
@@ -128,6 +133,38 @@ async function start() {
     reportError(error)
   })
 
+  async function sendSpectrumTiles(tiles: SpectrumTile[]) {
+    for (let index = 0; index < tiles.length; index++) {
+      if (disposed) return
+      const updated = await bridge.updateImageRawData(new ImageRawDataUpdate({
+        containerID: 10 + index, containerName: `spectrum-${index}`, imageData: tiles[index].pixels,
+      }))
+      if (updated !== ImageRawDataUpdateResult.success) throw new Error(`Failed to send spectrum tile ${index}`)
+    }
+  }
+
+  const spectrumSender = new LatestFrameSender(async () => {
+    const view = controls.spectrum
+    if (disposed || page !== 'spectrum' || state !== 'spectrum' || controls.isOverlayOpen || !view) return
+    // Snapshot one complete view before sending its four tiles. Input can keep
+    // advancing the model; the next batch will render the most recent revision.
+    const { plot, mode, cursorBin, peakBin, revision } = view
+    const key = `${session}:${revision}`
+    if (key === lastSpectrumKey) return
+    const tiles = drawSpectrum(spectrumContext, plot, mode === 'cursor' ? cursorBin : undefined)
+    await sendSpectrumTiles(tiles)
+    if (disposed) return
+    lastSpectrumKey = key
+    const readout = cursorReadout(plot, cursorBin)
+    status.textContent = mode === 'cursor'
+      ? `Cursor mode\n${readout.frequencyLabel} | ${readout.amplitudeLabel}`
+      : 'Normal mode\nTap to record again'
+    console.log('[spectrum-view]', JSON.stringify({
+      session, revision, mode, cursorBin, peakBin,
+      frequencyHz: readout.frequencyHz, amplitudeDb: readout.amplitudeDb,
+    }))
+  }, error => { void showError(error) })
+
   const indicator = new CalculatingIndicator(visible => {
     calculatingVisible = visible
     if (!disposed && page === 'waveform') void imageSender.request()
@@ -155,7 +192,7 @@ async function start() {
   }
 
   async function restoreWaveformPage() {
-    await drainWaveform()
+    await Promise.all([drainWaveform(), spectrumSender.whenIdle()])
     if (disposed) return
     if (page !== 'waveform') {
       const rebuilt = await bridge.rebuildPageContainer(new RebuildPageContainer(waveformPage()))
@@ -163,6 +200,8 @@ async function start() {
       page = 'waveform'
     }
     lastImageKey = ''
+    lastSpectrumKey = ''
+    controls.clearSpectrum()
     waveformCanvas.hidden = false
     spectrumCanvas.hidden = true
   }
@@ -212,6 +251,7 @@ async function start() {
     const spectrum = await fft.analyze(samples, recording.sampleRate, currentSession)
     if (disposed || currentSession !== session) return
     const plot = prepareSpectrum(spectrum)
+    controls.setSpectrum(plot, spectrum.meanPower)
     const tiles = drawSpectrum(spectrumContext, plot)
     indicator.stop()
     state = 'switching'
@@ -221,6 +261,12 @@ async function start() {
 
     const rebuilt = await bridge.rebuildPageContainer(new RebuildPageContainer({
       containerTotalNum: 5,
+      menuObject: new MenuContainerProperty({
+        menuItems: [
+          new MenuItemProperty({ itemID: CURSOR_MODE_ID, itemName: 'Cursor mode' }),
+          new MenuItemProperty({ itemID: NORMAL_MODE_ID, itemName: 'Normal mode' }),
+        ],
+      }),
       textObject: [new TextContainerProperty({
         containerID: textID, containerName: 'spectrum-input',
         xPosition: 0, yPosition: 0, width: SCREEN_WIDTH, height: SCREEN_HEIGHT,
@@ -234,22 +280,14 @@ async function start() {
     }))
     if (!rebuilt) throw new Error('Failed to create spectrum page')
     page = 'spectrum'
-    for (let index = 0; index < tiles.length; index++) {
-      if (disposed) return
-      const updated = await bridge.updateImageRawData(new ImageRawDataUpdate({
-        containerID: 10 + index, containerName: `spectrum-${index}`, imageData: tiles[index].pixels,
-      }))
-      if (updated !== ImageRawDataUpdateResult.success) throw new Error(`Failed to send spectrum tile ${index}`)
-    }
+    await sendSpectrumTiles(tiles)
     if (disposed) return
     state = 'spectrum'
     waveformCanvas.hidden = true
     spectrumCanvas.hidden = false
-    status.textContent = 'Averaged RMS spectrum\nTap to record again'
-    let peakBin = 0
-    for (let k = 1; k < plot.dbValues.length; k++) {
-      if (plot.dbValues[k] > plot.dbValues[peakBin]) peakBin = k
-    }
+    lastSpectrumKey = `${session}:0`
+    status.textContent = 'Normal mode\nTap to record again'
+    const peakBin = controls.spectrum!.peakBin
     console.log('[fft] ready', JSON.stringify({
       session, samples: recording.sampleCount, frameCount: spectrum.frameCount,
       fftSize: spectrum.fftSize, hopSize: spectrum.hopSize,
@@ -291,6 +329,7 @@ async function start() {
 
   async function handleTap() {
     if (disposed || state === 'starting' || state === 'calculating' || state === 'switching') return
+    if (state === 'spectrum' && controls.spectrum?.mode === 'cursor') return
     try {
       if (state === 'recording') await finishRecording()
       else await beginRecording()
@@ -308,11 +347,9 @@ async function start() {
       const accepted = recording.appendPcm(event.audioEvent.audioPcm)
       if (!accepted && state !== 'ready' && state !== 'starting') afterStop++
     }
-    const input = event.textEvent ?? event.sysEvent
-    // Protobuf may omit CLICK_EVENT because its enum value is zero.
-    if (input && (input.eventType ?? OsEventTypeList.CLICK_EVENT) === OsEventTypeList.CLICK_EVENT) {
-      void handleTap()
-    }
+    const action = controls.handleEvent(event, state === 'spectrum')
+    if (action === 'tap') void handleTap()
+    else if (action === 'redraw') void spectrumSender.request()
   })
 
   const imageTimer = window.setInterval(() => {
@@ -342,6 +379,7 @@ async function start() {
     window.clearInterval(statusTimer)
     imageSender.dispose()
     statusSender.dispose()
+    spectrumSender.dispose()
     fft?.dispose()
     void bridge.audioControl(false).catch(reportError)
   })

@@ -48,6 +48,18 @@ export interface SpectrumTile {
   pixels: Uint8Array
 }
 
+export function cursorReadout(plot: SpectrumPlot, bin: number) {
+  if (!Number.isInteger(bin) || bin < 0 || bin >= plot.dbValues.length) throw new Error('Invalid cursor bin')
+  const frequencyHz = bin * plot.binHz
+  const amplitudeDb = plot.dbValues[bin]
+  return {
+    frequencyHz,
+    amplitudeDb,
+    frequencyLabel: `${frequencyHz.toFixed(2)} Hz`,
+    amplitudeLabel: `${amplitudeDb <= DB_FLOOR ? '≤' : ''}${amplitudeDb.toFixed(2)} dB`,
+  }
+}
+
 export function splitSpectrumImage(gray: Uint8Array): SpectrumTile[] {
   if (gray.length !== SCREEN_WIDTH * SCREEN_HEIGHT) throw new Error('Invalid spectrum image size')
   const tiles: SpectrumTile[] = []
@@ -64,7 +76,7 @@ export function splitSpectrumImage(gray: Uint8Array): SpectrumTile[] {
   return tiles
 }
 
-export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPlot): SpectrumTile[] {
+export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPlot, cursorBin?: number): SpectrumTile[] {
   context.fillStyle = '#000'
   context.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
   context.font = '12px monospace'
@@ -119,6 +131,27 @@ export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPl
   context.strokeStyle = '#fff'
   context.stroke()
   context.restore()
+  if (cursorBin !== undefined) {
+    const readout = cursorReadout(plot, cursorBin)
+    const x = Math.round(LEFT + readout.frequencyHz / MAX_FREQUENCY * (RIGHT - LEFT)) + 0.5
+    context.save()
+    context.strokeStyle = '#fff'
+    context.lineWidth = 1
+    context.setLineDash([4, 3])
+    context.beginPath()
+    context.moveTo(x, TOP)
+    context.lineTo(x, BOTTOM + 1)
+    context.stroke()
+    context.restore()
+    // Keep the complete plot width; the readout only covers the top-right area.
+    context.fillStyle = '#000'
+    context.fillRect(RIGHT - 164, TOP + 7, 160, 52)
+    context.font = '14px monospace'
+    context.textAlign = 'right'
+    context.fillStyle = '#fff'
+    context.fillText(readout.frequencyLabel, RIGHT - 12, TOP + 22)
+    context.fillText(readout.amplitudeLabel, RIGHT - 12, TOP + 44)
+  }
   const rgba = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT).data
   const gray = new Uint8Array(SCREEN_WIDTH * SCREEN_HEIGHT)
   for (let i = 0; i < gray.length; i++) gray[i] = rgba[i * 4]
