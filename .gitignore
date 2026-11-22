@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Even Hub build packages
+*.ehpk
+
 # Local environment variables (keep examples shareable)
 .env
 .env.*
