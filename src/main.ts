@@ -6,7 +6,6 @@ import {
   MenuContainerProperty,
   MenuItemProperty,
   RebuildPageContainer,
-  StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
   waitForEvenAppBridge,
@@ -15,6 +14,7 @@ import { CalculatingIndicator } from './calculating.ts'
 import { FFT_SIZE, RecordingTooShortError } from './fft.ts'
 import { FftClient } from './fft-client.ts'
 import { LatestFrameSender } from './latest-frame-sender.ts'
+import { initializePage } from './page-lifecycle.ts'
 import { RecordingBuffer } from './recording.ts'
 import { cursorReadout, drawSpectrum, prepareSpectrum, SCREEN_HEIGHT, SCREEN_WIDTH } from './spectrum.ts'
 import type { SpectrumTile } from './spectrum.ts'
@@ -23,7 +23,7 @@ import { drawWaveform, IMAGE_HEIGHT, IMAGE_WIDTH } from './waveform.ts'
 import './style.css'
 
 const textID = 1
-const textName = 'recording-status'
+const textName = 'status'
 const imageID = 2
 const imageName = 'time-waveform'
 const recording = new RecordingBuffer()
@@ -63,10 +63,8 @@ function waveformPage() {
 
 async function start() {
   const bridge = await waitForEvenAppBridge()
-  const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(waveformPage()))
-  if (result !== StartUpPageCreateResult.success) {
-    throw new Error(`Failed to create startup page: ${result}`)
-  }
+  const startup = await initializePage(bridge, new CreateStartUpPageContainer(waveformPage()))
+  console.log('[page-startup]', startup)
 
   let state: AppState = 'ready'
   let page: 'waveform' | 'spectrum' = 'waveform'
