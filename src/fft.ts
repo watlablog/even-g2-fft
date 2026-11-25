@@ -80,12 +80,20 @@ export function analyzePcm(samples: Float32Array, sampleRate = SAMPLE_RATE): Ave
   return { sampleRate, fftSize: FFT_SIZE, hopSize: HOP_SIZE, frameCount, meanPower }
 }
 
+// A single RT frame uses the same Hann and RMS normalization as recording analysis.
+export function analyzeFrame(samples: Float32Array, sampleRate = SAMPLE_RATE): AveragedSpectrum {
+  if (samples.length !== FFT_SIZE) throw new Error(`Expected exactly ${FFT_SIZE} samples`)
+  return { ...analyzePcm(samples, sampleRate), hopSize: FFT_SIZE }
+}
+
 export interface AnalysisRequest {
+  requestId: number
+  kind: 'average' | 'single'
   session: number
   samples: Float32Array
   sampleRate: number
 }
 
 export type AnalysisResponse =
-  | { session: number; ok: true; spectrum: AveragedSpectrum }
-  | { session: number; ok: false; error: string }
+  | { session: number; requestId: number; ok: true; spectrum: AveragedSpectrum }
+  | { session: number; requestId: number; ok: false; error: string }

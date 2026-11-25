@@ -1,5 +1,6 @@
 import { DB_FLOOR, MAX_FREQUENCY, REFERENCE_AMPLITUDE } from './fft.ts'
 import type { AveragedSpectrum } from './fft.ts'
+import type { CursorFrame } from './cursor-motion.ts'
 
 export const SCREEN_WIDTH = 576
 export const SCREEN_HEIGHT = 288
@@ -9,6 +10,9 @@ const LEFT = 64
 const RIGHT = 563
 const TOP = 18
 const BOTTOM = 243
+const MIN_PEAK_PROMINENCE_DB = 6
+
+export const SPECTRUM_READOUT = { x: RIGHT - 164, y: TOP + 7, width: 160, height: 84 } as const
 
 export interface SpectrumPlot {
   binHz: number
@@ -60,6 +64,46 @@ export function cursorReadout(plot: SpectrumPlot, bin: number) {
   }
 }
 
+export interface SpectrumPeak {
+  bin: number
+  amplitudeDb: number
+  prominenceDb: number
+}
+
+export function spectrumPeaks(plot: SpectrumPlot, minimumProminence = 0): SpectrumPeak[] {
+  const values = plot.dbValues
+  const peaks: SpectrumPeak[] = []
+  for (let start = 1; start < values.length - 1; start++) {
+    const height = values[start]
+    let end = start
+    while (end + 1 < values.length && values[end + 1] === height) end++
+    if (height > DB_FLOOR && height > values[start - 1] && end < values.length - 1 && height > values[end + 1]) {
+      let leftBase = height
+      let rightBase = height
+      for (let k = start - 1; k >= 0 && values[k] <= height; k--) leftBase = Math.min(leftBase, values[k])
+      for (let k = end + 1; k < values.length && values[k] <= height; k++) rightBase = Math.min(rightBase, values[k])
+      const prominenceDb = height - Math.max(leftBase, rightBase)
+      if (prominenceDb >= minimumProminence) {
+        peaks.push({ bin: Math.floor((start + end) / 2), amplitudeDb: height, prominenceDb })
+      }
+    }
+    start = end
+  }
+  return peaks
+}
+
+export function rankedSpectrumPeaks(plot: SpectrumPlot): number[] {
+  return spectrumPeaks(plot)
+    .sort((a, b) => b.amplitudeDb - a.amplitudeDb || a.bin - b.bin)
+    .slice(0, 10).map(peak => peak.bin)
+}
+
+export function nearestSpectrumPeak(plot: SpectrumPlot, cursorBin: number): number {
+  if (!Number.isInteger(cursorBin) || cursorBin < 0 || cursorBin >= plot.dbValues.length) throw new Error('Invalid cursor bin')
+  return spectrumPeaks(plot, MIN_PEAK_PROMINENCE_DB)
+    .sort((a, b) => Math.abs(a.bin - cursorBin) - Math.abs(b.bin - cursorBin) || b.amplitudeDb - a.amplitudeDb || a.bin - b.bin)[0]?.bin ?? cursorBin
+}
+
 export function splitSpectrumImage(gray: Uint8Array): SpectrumTile[] {
   if (gray.length !== SCREEN_WIDTH * SCREEN_HEIGHT) throw new Error('Invalid spectrum image size')
   const tiles: SpectrumTile[] = []
@@ -76,7 +120,7 @@ export function splitSpectrumImage(gray: Uint8Array): SpectrumTile[] {
   return tiles
 }
 
-export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPlot, cursorBin?: number): SpectrumTile[] {
+function drawSpectrumBackground(context: CanvasRenderingContext2D, plot: SpectrumPlot) {
   context.fillStyle = '#000'
   context.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
   context.font = '12px monospace'
@@ -131,29 +175,78 @@ export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPl
   context.strokeStyle = '#fff'
   context.stroke()
   context.restore()
-  if (cursorBin !== undefined) {
-    const readout = cursorReadout(plot, cursorBin)
-    const x = Math.round(LEFT + readout.frequencyHz / MAX_FREQUENCY * (RIGHT - LEFT)) + 0.5
-    context.save()
+}
+
+function drawReadoutBackground(context: CanvasRenderingContext2D) {
+  context.fillStyle = '#000'
+  context.fillRect(SPECTRUM_READOUT.x, SPECTRUM_READOUT.y, SPECTRUM_READOUT.width, SPECTRUM_READOUT.height)
+}
+
+function drawCursor(context: CanvasRenderingContext2D, plot: SpectrumPlot, bin: number, markerOnly: boolean) {
+  const x = Math.round(LEFT + bin * plot.binHz / MAX_FREQUENCY * (RIGHT - LEFT)) + 0.5
+  context.save()
+  context.beginPath()
+  context.rect(LEFT, TOP, RIGHT - LEFT + 1, BOTTOM - TOP + 1)
+  context.clip()
+  context.beginPath()
+  if (markerOnly) {
+    context.fillStyle = '#fff'
+    context.moveTo(x, BOTTOM - 9)
+    context.lineTo(x - 4, BOTTOM - 1)
+    context.lineTo(x + 4, BOTTOM - 1)
+    context.closePath()
+    context.fill()
+  } else {
     context.strokeStyle = '#fff'
     context.lineWidth = 1
     context.setLineDash([4, 3])
-    context.beginPath()
     context.moveTo(x, TOP)
     context.lineTo(x, BOTTOM + 1)
     context.stroke()
-    context.restore()
-    // Keep the complete plot width; the readout only covers the top-right area.
-    context.fillStyle = '#000'
-    context.fillRect(RIGHT - 164, TOP + 7, 160, 52)
+  }
+  context.restore()
+}
+
+function spectrumTiles(context: CanvasRenderingContext2D): SpectrumTile[] {
+  const rgba = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT).data
+  const gray = new Uint8Array(SCREEN_WIDTH * SCREEN_HEIGHT)
+  for (let i = 0; i < gray.length; i++) gray[i] = rgba[i * 4]
+  return splitSpectrumImage(gray)
+}
+
+export class SpectrumRenderer {
+  private readonly normalBackground: ImageData
+  private readonly cursorBackground: ImageData
+  private readonly context: CanvasRenderingContext2D
+  private readonly plot: SpectrumPlot
+
+  constructor(context: CanvasRenderingContext2D, plot: SpectrumPlot) {
+    this.context = context
+    this.plot = plot
+    drawSpectrumBackground(context, plot)
+    this.normalBackground = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+    drawReadoutBackground(context)
+    this.cursorBackground = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+  }
+
+  render(cursor?: CursorFrame, showReadout = false): SpectrumTile[] {
+    this.context.putImageData(cursor || showReadout ? this.cursorBackground : this.normalBackground, 0, 0)
+    if (cursor) drawCursor(this.context, this.plot, cursor.bin, cursor.moving)
+    return spectrumTiles(this.context)
+  }
+}
+
+export function drawSpectrum(context: CanvasRenderingContext2D, plot: SpectrumPlot, cursorBin?: number): SpectrumTile[] {
+  drawSpectrumBackground(context, plot)
+  if (cursorBin !== undefined) {
+    const readout = cursorReadout(plot, cursorBin)
+    drawCursor(context, plot, cursorBin, false)
+    drawReadoutBackground(context)
     context.font = '14px monospace'
     context.textAlign = 'right'
     context.fillStyle = '#fff'
     context.fillText(readout.frequencyLabel, RIGHT - 12, TOP + 22)
     context.fillText(readout.amplitudeLabel, RIGHT - 12, TOP + 44)
   }
-  const rgba = context.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT).data
-  const gray = new Uint8Array(SCREEN_WIDTH * SCREEN_HEIGHT)
-  for (let i = 0; i < gray.length; i++) gray[i] = rgba[i * 4]
-  return splitSpectrumImage(gray)
+  return spectrumTiles(context)
 }

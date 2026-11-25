@@ -7,7 +7,7 @@ class FakeWorker extends EventTarget {
   terminated = false
   postMessage(request, transfer) { this.requests.push({ request, transfer }) }
   terminate() { this.terminated = true }
-  respond(data) { this.dispatchEvent(new MessageEvent('message', { data })) }
+  respond(data) { this.dispatchEvent(new MessageEvent('message', { data: { requestId: this.requests.at(-1).request.requestId, ...data } })) }
 }
 
 test('waits for the matching worker response, transfers PCM and rejects overlapping jobs', async () => {
@@ -55,4 +55,21 @@ test('worker failure and disposal reject pending analysis instead of leaving cal
   secondClient.dispose()
   await assert.rejects(cancelled, /cancelled/)
   assert.equal(secondWorker.terminated, true)
+})
+
+test('a delayed response in the same session cannot settle a later single-frame request', async () => {
+  const worker = new FakeWorker()
+  const client = new FftClient(worker)
+  const first = client.analyzeFrame(new Float32Array(2048), 16000, 7)
+  const oldId = worker.requests[0].request.requestId
+  assert.equal(worker.requests[0].request.kind, 'single')
+  worker.respond({ session: 7, ok: true, spectrum: 'first' })
+  assert.equal(await first, 'first')
+  let resolved = false
+  const next = client.analyzeFrame(new Float32Array(2048), 16000, 7).then(value => { resolved = true; return value })
+  worker.respond({ session: 7, requestId: oldId, ok: true, spectrum: 'stale' })
+  await Promise.resolve(); assert.equal(resolved, false)
+  worker.respond({ session: 7, ok: true, spectrum: 'next' })
+  assert.equal(await next, 'next')
+  client.dispose()
 })

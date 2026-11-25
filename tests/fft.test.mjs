@@ -89,3 +89,14 @@ test('rejects invalid samples and sample rates instead of producing NaN spectra'
   assert.throws(() => analyzePcm(samples), /non-finite/)
   assert.throws(() => analyzePcm(sine(0.5), 0), /sample rate/)
 })
+
+test('single-frame analysis uses the same RMS theory, reports no overlap, and rejects other lengths', async () => {
+  const { analyzeFrame } = await import('../src/fft.ts')
+  const frame = analyzeFrame(sine(1, FFT_SIZE))
+  assert.equal(frame.frameCount, 1)
+  assert.equal(frame.hopSize, FFT_SIZE)
+  near(frame.meanPower[128], .5)
+  assert.deepEqual(frame.meanPower, analyzePcm(sine(1, FFT_SIZE)).meanPower)
+  assert.throws(() => analyzeFrame(sine(1, FFT_SIZE - 1)), /exactly/)
+  assert.throws(() => analyzeFrame(sine(1, FFT_SIZE * 2)), /exactly/)
+})
